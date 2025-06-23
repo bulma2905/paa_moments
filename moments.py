@@ -109,12 +109,7 @@ class OpenAIClassifier:
 
     def group_by_moment(self, seed: str, questions: List[str]) -> Dict[str, List[str]]:
         prompt = (
-            f"You are a customer journey specialist. For the seed '{seed}', organize the questions below into user-centric moments—stages in a real person's exploration or use of this topic."
-            " Provide a descriptive name for each moment that reflects what users are thinking or trying to achieve, then list the associated questions."
-            " Return ONLY a JSON object with moment names as keys and question arrays as values."
-            "Questions:
-" + "
-".join(f"- {q}" for q in questions)
+            f"You are a customer journey specialist. For the seed '{seed}', organize the questions below into user-centric moments—stages in a real person's exploration or use of this topic. Provide a descriptive name for each moment that reflects what users are thinking or trying to achieve, then list the associated questions. Return ONLY a JSON object with moment names as keys and question arrays as values. Questions:" + " ".join(f"- {q}" for q in questions)
         )
 
         for attempt in range(3):
