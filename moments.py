@@ -107,7 +107,7 @@ class OpenAIClassifier:
         self.client = client
         self.model = model
 
-        def group_by_moment(self, seed: str, questions: List[str]) -> Dict[str, List[str]]:
+    def group_by_moment(self, seed: str, questions: List[str]) -> Dict[str, List[str]]:
         # Build a unified prompt with all questions
         questions_block = "
 ".join(f"- {q}" for q in questions)
