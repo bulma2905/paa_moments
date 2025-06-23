@@ -107,33 +107,28 @@ class OpenAIClassifier:
         self.client = client
         self.model = model
 
-    def group_by_moment(self, seed: str, questions: List[str]) -> Dict[str, List[str]]:
-        # Streamlined, balanced prompt to drive user-centric moments without breaking formatting
-            prompt = f"""
-            You are a customer journey specialist organizing questions about '{seed}'. Group them into user-centric moments—stages reflecting what a person is thinking or trying to achieve. Use descriptive stage names and list the associated questions. Return ONLY a JSON object with moment names as keys and arrays of questions as values.
-            
-            Questions:
-            """
-            for q in questions:
-                prompt += f"- {q}
-            "
+        def group_by_moment(self, seed: str, questions: List[str]) -> Dict[str, List[str]]:
+        # Build a unified prompt with all questions
+        questions_block = "
+".join(f"- {q}" for q in questions)
+        prompt = f"""
+You are a customer journey specialist organizing questions about '{seed}'. Group them into user-centric moments—stages reflecting what a person is thinking or trying to achieve. Use descriptive stage names and list the associated questions. Return ONLY a JSON object with moment names as keys and arrays of questions as values.
+
+Questions:
+{questions_block}
+"""
         for attempt in range(3):
             try:
                 resp = self.client.chat.completions.create(
                     model=self.model,
                     messages=[
-                        {"role": "system", "content": "You group questions into user journey stages."},
+                        {"role": "system", "content": "You are an assistant grouping questions into user journey stages."},
                         {"role": "user", "content": prompt}
                     ],
                     temperature=0,
                     response_format={"type": "json_object"}
                 )
                 return json.loads(resp.choices[0].message.content)
-            except Exception as e:
-                logging.warning(f"OpenAI attempt {attempt+1} failed: {e}")
-                time.sleep(3)
-        logging.error(f"All OpenAI attempts failed for '{seed}'")
-        return {}(resp.choices[0].message.content)
             except Exception as e:
                 logging.warning(f"OpenAI attempt {attempt+1} failed: {e}")
                 time.sleep(3)
