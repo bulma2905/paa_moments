@@ -33,9 +33,6 @@ THRESHOLD = st.sidebar.slider("Similarity Threshold", min_value=0.0, max_value=1
 # Seed terms input
 seeds_input = st.sidebar.text_area("Enter seed terms, one per line:")
 
-# Output settings
-OUTPUT_DIR = st.sidebar.text_input("Output Directory", value="output")
-
 # Logging level
 LOG_LEVEL = st.sidebar.selectbox("Log Level", ["DEBUG", "INFO", "WARNING", "ERROR"], index=1)
 
