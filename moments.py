@@ -62,18 +62,29 @@ class AlsoAskedClient:
         self.session.headers.update(self.headers)
 
     def get_questions(self, seed_query: str, limit: int = TOP_X, depth: int = 2, region: str = "gb", language: str = "en") -> List[str]:
-        payload = {"terms": [seed_query], "language": language, "region": region, "depth": depth, "fresh": True, "async": False, "notify_webhooks": False}
+        payload = {
+            "terms": [seed_query],
+            "language": language,
+            "region": region,
+            "depth": depth,
+            "fresh": True,
+            "async": False,
+            "notify_webhooks": False
+        }
         def flatten(qs: Any) -> List[str]:
             flat: List[str] = []
             if not isinstance(qs, list):
                 return flat
             for q in qs:
-                if not isinstance(q, dict): continue
+                if not isinstance(q, dict):
+                    continue
                 text = q.get("question") or q.get("query")
-                if text: flat.append(text)
+                if text:
+                    flat.append(text)
                 nested = q.get("results") or []
                 flat.extend(flatten(nested))
             return flat
+
         for attempt in range(3):
             try:
                 logging.info(f"Fetching PAA for '{seed_query}', attempt {attempt+1}")
@@ -89,6 +100,7 @@ class AlsoAskedClient:
             except Exception as e:
                 logging.warning(f"AlsoAsked attempt {attempt+1} failed: {e}")
                 time.sleep(3)
+
         logging.error(f"All AlsoAsked attempts failed for '{seed_query}'")
         return []
 
@@ -108,13 +120,15 @@ class OpenAIClassifier:
         self.model = model
 
     def group_by_moment(self, seed: str, questions: List[str]) -> Dict[str, List[str]]:
-        # Build a unified prompt with all questions
+        # Proper newline join
         questions_block = "\n".join(f"- {q}" for q in questions)
-        prompt = f"""You are a customer journey specialist organizing questions about '{seed}'. Group them into user-centric moments—stages reflecting what a person is thinking or trying to achieve. Use descriptive stage names and list the associated questions. Return ONLY a JSON object with moment names as keys and arrays of questions as values.
-
-Questions:
-{questions_block}
-"""
+        prompt = (
+            f"You are a customer journey specialist organizing questions about '{seed}'. "
+            "Group them into user-centric moments—stages reflecting what a person is thinking or trying to achieve. "
+            "Use descriptive stage names and list the associated questions. Return ONLY a JSON object "
+            "with moment names as keys and arrays of questions as values.\n\n"
+            f"Questions:\n{questions_block}"
+        )
         for attempt in range(3):
             try:
                 resp = self.client.chat.completions.create(
@@ -124,16 +138,18 @@ Questions:
                         {"role": "user", "content": prompt}
                     ],
                     temperature=0,
-                    response_format={"type": "json_object"}
                 )
                 return json.loads(resp.choices[0].message.content)
             except Exception as e:
                 logging.warning(f"OpenAI attempt {attempt+1} failed: {e}")
                 time.sleep(3)
+
         logging.error(f"All OpenAI attempts failed for '{seed}'")
         return {}
 
+# -----------------------------
 # Main Streamlit App
+# -----------------------------
 st.title("🔍 PAA & Clustering Pipeline")
 if st.sidebar.button("Run Pipeline"):
     setup_logging(LOG_LEVEL)
@@ -144,7 +160,10 @@ if st.sidebar.button("Run Pipeline"):
     openai_client = OpenAI(api_key=OPENAI_API_KEY)
     classifier = OpenAIClassifier(client=openai_client)
 
-    # In-memory zip buffer
+    # Accumulators for the "all" exports
+    all_q_dfs: List[pd.DataFrame] = []
+    all_m_rows: List[Dict[str, Any]] = []
+
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for seed in seeds:
@@ -153,21 +172,63 @@ if st.sidebar.button("Run Pipeline"):
             if not questions:
                 st.warning(f"No questions retrieved for '{seed}'. Skipping.")
                 continue
+
+            # Score and filter
             scores = sbert.score(seed, questions)
             filtered = [q for q, s in zip(questions, scores) if s >= THRESHOLD]
             st.write(f" - {len(filtered)}/{len(questions)} passed threshold")
-            groups = classifier.group_by_moment(seed, filtered) if filtered else {}
 
-            # Create CSV strings
-            q_df = pd.DataFrame({"seed": seed, "question": questions, "similarity": scores})
+            # Group into moments
+            groups: Dict[str, List[str]] = {}
+            if filtered:
+                groups = classifier.group_by_moment(seed, filtered)
+
+            # Build per-seed DataFrames
+            q_df = pd.DataFrame({
+                "seed": seed,
+                "question": questions,
+                "similarity": scores
+            })
+            all_q_dfs.append(q_df)
+
             m_rows = []
             for moment, qs in groups.items():
-                m_rows.append({"seed": seed, "moment": moment, "questions": "|".join(qs)})
+                m_rows.append({
+                    "seed": seed,
+                    "moment": moment,
+                    "questions": "|".join(qs)
+                })
+            all_m_rows.extend(m_rows)
+
             m_df = pd.DataFrame(m_rows)
 
-            # Write CSVs into zip
-            zf.writestr(f"{seed.replace(' ', '_')}_questions.csv", q_df.to_csv(index=False))
-            zf.writestr(f"{seed.replace(' ', '_')}_moments.csv", m_df.to_csv(index=False))
+            # Write per-seed CSVs
+            safe = seed.replace(" ", "_")
+            zf.writestr(f"{safe}_questions.csv", q_df.to_csv(index=False))
+            zf.writestr(f"{safe}_moments.csv", m_df.to_csv(index=False))
+
+        # After loop: write merged "all" CSVs
+        # 1) All questions
+        all_questions_df = pd.concat(all_q_dfs, ignore_index=True)
+        zf.writestr("all_questions.csv", all_questions_df.to_csv(index=False))
+
+        # 2) All moments, merged by topic
+        all_m_df = pd.DataFrame(all_m_rows)
+        if not all_m_df.empty:
+            merged = (
+                all_m_df
+                .drop(columns=["seed"])
+                .assign(questions=lambda df: df["questions"].str.split("|"))
+                .explode("questions")
+                .drop_duplicates(subset=["moment", "questions"])
+                .groupby("moment")["questions"]
+                .agg(lambda qs: "|".join(qs))
+                .reset_index()
+            )
+            zf.writestr("all_moments.csv", merged.to_csv(index=False))
+        else:
+            # empty scaffold
+            zf.writestr("all_moments.csv", pd.DataFrame(columns=["moment", "questions"]).to_csv(index=False))
 
     zip_buffer.seek(0)
     st.download_button(
