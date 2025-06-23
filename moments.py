@@ -3,6 +3,8 @@ import csv
 import logging
 import time
 from typing import List, Dict, Any
+import io
+import zipfile
 
 import requests
 import pandas as pd
@@ -28,17 +30,25 @@ OPENAI_MODEL = st.sidebar.text_input("OpenAI Model", value="gpt-3.5-turbo")
 TOP_X = st.sidebar.number_input("Top X results", min_value=1, value=50)
 THRESHOLD = st.sidebar.slider("Similarity Threshold", min_value=0.0, max_value=1.0, value=0.4, step=0.01)
 
-# File settings
-SEED_FILE = st.sidebar.text_input("Seed File Path", value="keywords.txt")
+# Seed terms input
+seeds_input = st.sidebar.text_area("Enter seed terms, one per line:")
+
+# Output settings
 OUTPUT_DIR = st.sidebar.text_input("Output Directory", value="output")
 
 # Logging level
 LOG_LEVEL = st.sidebar.selectbox("Log Level", ["DEBUG", "INFO", "WARNING", "ERROR"], index=1)
 
-# Validate credentials
+# Validate credentials and seeds
 if not OPENAI_API_KEY or not ALSOASKED_API_KEY:
     st.error("Both OpenAI and AlsoAsked API keys are required.")
     st.stop()
+if not seeds_input.strip():
+    st.error("Please enter at least one seed term.")
+    st.stop()
+
+# Parse seeds
+seeds = [line.strip() for line in seeds_input.splitlines() if line.strip()]
 
 # -----------------------------
 # Helper Functions and Classes
@@ -57,31 +67,18 @@ class AlsoAskedClient:
         self.session.headers.update(self.headers)
 
     def get_questions(self, seed_query: str, limit: int = TOP_X, depth: int = 2, region: str = "gb", language: str = "en") -> List[str]:
-        payload = {
-            "terms": [seed_query],
-            "language": language,
-            "region": region,
-            "depth": depth,
-            "fresh": True,
-            "async": False,
-            "notify_webhooks": False
-        }
-
+        payload = {"terms": [seed_query], "language": language, "region": region, "depth": depth, "fresh": True, "async": False, "notify_webhooks": False}
         def flatten(qs: Any) -> List[str]:
             flat: List[str] = []
             if not isinstance(qs, list):
                 return flat
             for q in qs:
-                if not isinstance(q, dict):
-                    continue
+                if not isinstance(q, dict): continue
                 text = q.get("question") or q.get("query")
-                if text:
-                    flat.append(text)
-                # Recurse if nested results available and valid
+                if text: flat.append(text)
                 nested = q.get("results") or []
                 flat.extend(flatten(nested))
             return flat
-
         for attempt in range(3):
             try:
                 logging.info(f"Fetching PAA for '{seed_query}', attempt {attempt+1}")
@@ -92,11 +89,8 @@ class AlsoAskedClient:
                 if not queries or not isinstance(queries, list):
                     logging.warning(f"No 'queries' list returned for '{seed_query}'")
                     return []
-                first = queries[0] or {}
-                results = first.get("results") or []
-                questions = flatten(results)[:limit]
-                logging.debug(f"Received PAA questions: {questions}")
-                return questions
+                results = (queries[0] or {}).get("results") or []
+                return flatten(results)[:limit]
             except Exception as e:
                 logging.warning(f"AlsoAsked attempt {attempt+1} failed: {e}")
                 time.sleep(3)
@@ -127,10 +121,7 @@ class OpenAIClassifier:
             try:
                 resp = self.client.chat.completions.create(
                     model=self.model,
-                    messages=[
-                        {"role": "system", "content": "You group questions into moments."},
-                        {"role": "user", "content": prompt}
-                    ],
+                    messages=[{"role": "system", "content": "You are an assistant grouping questions."}, {"role": "user", "content": prompt}],
                     temperature=0,
                     response_format={"type": "json_object"}
                 )
@@ -142,14 +133,6 @@ class OpenAIClassifier:
         return {}
 
 # File I/O Utilities
-
-def read_seeds(file_path: str) -> List[str]:
-    if not os.path.exists(file_path):
-        st.error(f"Seed file not found: {file_path}")
-        st.stop()
-    with open(file_path, 'r', encoding='utf-8') as f:
-        return [line.strip() for line in f if line.strip()]
-
 
 def write_csv(output_dir: str, seed: str, questions: List[str], scores: List[float], groups: Dict[str, List[str]]) -> None:
     os.makedirs(output_dir, exist_ok=True)
@@ -166,21 +149,26 @@ def write_csv(output_dir: str, seed: str, questions: List[str], scores: List[flo
         for moment, qs in groups.items(): writer.writerow([seed, moment, "|".join(qs)])
 
 # Streamlit UI
-
 st.title("🔍 PAA & Clustering Pipeline")
 if st.sidebar.button("Run Pipeline"):
     setup_logging(LOG_LEVEL)
     st.info("Starting pipeline...")
-    seeds = read_seeds(SEED_FILE)
     also_client = AlsoAskedClient(api_key=ALSOASKED_API_KEY)
     sbert = SBERTRelevance()
     openai_client = OpenAI(api_key=OPENAI_API_KEY)
     classifier = OpenAIClassifier(client=openai_client)
 
+    # Clear output dir
+    if os.path.exists(OUTPUT_DIR):
+        for f in os.listdir(OUTPUT_DIR):
+            os.remove(os.path.join(OUTPUT_DIR, f))
+    else:
+        os.makedirs(OUTPUT_DIR)
+
     for seed in seeds:
         st.write(f"Processing seed: {seed}")
         questions = also_client.get_questions(seed)
-        if questions is None:
+        if not questions:
             st.warning(f"No questions retrieved for '{seed}'. Skipping.")
             continue
         scores = sbert.score(seed, questions)
@@ -189,4 +177,17 @@ if st.sidebar.button("Run Pipeline"):
         groups = classifier.group_by_moment(seed, filtered) if filtered else {}
         write_csv(OUTPUT_DIR, seed, questions, scores, groups)
 
-    st.success(f"Pipeline completed. CSV files saved to {OUTPUT_DIR}.")
+    # Zip and download outputs
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for fname in os.listdir(OUTPUT_DIR):
+            path = os.path.join(OUTPUT_DIR, fname)
+            zf.write(path, arcname=fname)
+    buf.seek(0)
+    st.download_button(
+        label="📥 Download All Outputs",
+        data=buf,
+        file_name="outputs.zip",
+        mime="application/zip"
+    )
+    st.success("Pipeline complete!")
