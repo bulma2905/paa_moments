@@ -1,10 +1,8 @@
-import os
-import csv
+import io
+import zipfile
 import logging
 import time
 from typing import List, Dict, Any
-import io
-import zipfile
 
 import requests
 import pandas as pd
@@ -129,61 +127,46 @@ class OpenAIClassifier:
         logging.error(f"All OpenAI attempts failed for '{seed}'")
         return {}
 
-# File I/O Utilities
-
-def write_csv(output_dir: str, seed: str, questions: List[str], scores: List[float], groups: Dict[str, List[str]]) -> None:
-    os.makedirs(output_dir, exist_ok=True)
-    safe = seed.replace(' ', '_')[:50]
-    q_csv = os.path.join(output_dir, f"{safe}_questions.csv")
-    with open(q_csv, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerow(['seed', 'question', 'similarity'])
-        for q, s in zip(questions, scores): writer.writerow([seed, q, s])
-    m_csv = os.path.join(output_dir, f"{safe}_moments.csv")
-    with open(m_csv, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerow(['seed', 'moment', 'questions'])
-        for moment, qs in groups.items(): writer.writerow([seed, moment, "|".join(qs)])
-
-# Streamlit UI
+# Main Streamlit App
 st.title("🔍 PAA & Clustering Pipeline")
 if st.sidebar.button("Run Pipeline"):
     setup_logging(LOG_LEVEL)
     st.info("Starting pipeline...")
+
     also_client = AlsoAskedClient(api_key=ALSOASKED_API_KEY)
     sbert = SBERTRelevance()
     openai_client = OpenAI(api_key=OPENAI_API_KEY)
     classifier = OpenAIClassifier(client=openai_client)
 
-    # Clear output dir
-    if os.path.exists(OUTPUT_DIR):
-        for f in os.listdir(OUTPUT_DIR):
-            os.remove(os.path.join(OUTPUT_DIR, f))
-    else:
-        os.makedirs(OUTPUT_DIR)
+    # In-memory zip buffer
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for seed in seeds:
+            st.write(f"Processing seed: {seed}")
+            questions = also_client.get_questions(seed)
+            if not questions:
+                st.warning(f"No questions retrieved for '{seed}'. Skipping.")
+                continue
+            scores = sbert.score(seed, questions)
+            filtered = [q for q, s in zip(questions, scores) if s >= THRESHOLD]
+            st.write(f" - {len(filtered)}/{len(questions)} passed threshold")
+            groups = classifier.group_by_moment(seed, filtered) if filtered else {}
 
-    for seed in seeds:
-        st.write(f"Processing seed: {seed}")
-        questions = also_client.get_questions(seed)
-        if not questions:
-            st.warning(f"No questions retrieved for '{seed}'. Skipping.")
-            continue
-        scores = sbert.score(seed, questions)
-        filtered = [q for q, s in zip(questions, scores) if s >= THRESHOLD]
-        st.write(f" - {len(filtered)}/{len(questions)} passed threshold")
-        groups = classifier.group_by_moment(seed, filtered) if filtered else {}
-        write_csv(OUTPUT_DIR, seed, questions, scores, groups)
+            # Create CSV strings
+            q_df = pd.DataFrame({"seed": seed, "question": questions, "similarity": scores})
+            m_rows = []
+            for moment, qs in groups.items():
+                m_rows.append({"seed": seed, "moment": moment, "questions": "|".join(qs)})
+            m_df = pd.DataFrame(m_rows)
 
-    # Zip and download outputs
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for fname in os.listdir(OUTPUT_DIR):
-            path = os.path.join(OUTPUT_DIR, fname)
-            zf.write(path, arcname=fname)
-    buf.seek(0)
+            # Write CSVs into zip
+            zf.writestr(f"{seed.replace(' ', '_')}_questions.csv", q_df.to_csv(index=False))
+            zf.writestr(f"{seed.replace(' ', '_')}_moments.csv", m_df.to_csv(index=False))
+
+    zip_buffer.seek(0)
     st.download_button(
         label="📥 Download All Outputs",
-        data=buf,
+        data=zip_buffer.getvalue(),
         file_name="outputs.zip",
         mime="application/zip"
     )
