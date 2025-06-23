@@ -114,8 +114,8 @@ class OpenAIClassifier:
             
             Questions:
             """
-                    for q in questions:
-                        prompt += f"- {q}
+            for q in questions:
+                prompt += f"- {q}
             "
         for attempt in range(3):
             try:
