@@ -109,9 +109,13 @@ class OpenAIClassifier:
 
     def group_by_moment(self, seed: str, questions: List[str]) -> Dict[str, List[str]]:
         prompt = (
-            f"Given the seed term '{seed}', group the following questions into contexts or 'moments'. Output JSON where keys are moment names and values are lists of questions.\nQuestions:\n" +
-            "\n".join(f"- {q}" for q in questions)
+            "You are a user-journey expert helping map out how real people encounter and explore '{seed}'. "
+            "Group the following questions into meaningful user-centric moments (e.g. Awareness, Research/Consideration, Decision, Post-Purchase/Follow-Up). "
+            "For each moment, think about the user’s goal, pain points, and emotional state, then list which questions belong there. "
+            "Output ONLY a JSON object whose keys are the moment names and whose values are arrays of questions.\n\n"
+            "Questions:\n" + "\n".join(f"- {q}" for q in questions)
         )
+
         for attempt in range(3):
             try:
                 resp = self.client.chat.completions.create(
