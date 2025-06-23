@@ -109,9 +109,14 @@ class OpenAIClassifier:
 
     def group_by_moment(self, seed: str, questions: List[str]) -> Dict[str, List[str]]:
         # Streamlined, balanced prompt to drive user-centric moments without breaking formatting
-        prompt = (
-            f"You are a customer journey specialist organizing questions about '{seed}'. Group them into user-centric moments—stages reflecting what a person is thinking or trying to achieve." Use descriptive stage names and list the associated questions. Return ONLY a JSON object with moment names as keys and arrays of questions as values. Questions: " + ".join(f"- {q}" for q in questions)
-        )
+            prompt = f"""
+            You are a customer journey specialist organizing questions about '{seed}'. Group them into user-centric moments—stages reflecting what a person is thinking or trying to achieve. Use descriptive stage names and list the associated questions. Return ONLY a JSON object with moment names as keys and arrays of questions as values.
+            
+            Questions:
+            """
+                    for q in questions:
+                        prompt += f"- {q}
+            "
         for attempt in range(3):
             try:
                 resp = self.client.chat.completions.create(
