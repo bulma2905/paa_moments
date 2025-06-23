@@ -109,7 +109,7 @@ class OpenAIClassifier:
 
     def group_by_moment(self, seed: str, questions: List[str]) -> Dict[str, List[str]]:
         prompt = (
-            f"You are a customer journey specialist. For the seed '{seed}', organize the questions below into user-centric moments—stages in a real person's exploration or use of this topic. Provide a descriptive name for each moment that reflects what users are thinking or trying to achieve, then list the associated questions. Return ONLY a JSON object with moment names as keys and question arrays as values. Questions:" + " ".join(f"- {q}" for q in questions)
+            f"You are a customer journey specialist. For the seed '{seed}', organize the questions below into user-centric moments—stages in a real person's exploration or use of this topic. You are assisting in organizing a list of customer questions into groups reflecting key stages of a typical customer journey (such as Awareness, Consideration, Decision, Purchase, and Retention). Each question represents a moment in the customer’s experience. Here are examples of typical stages: Awareness: The customer realizes they have a need or a problem. Consideration: They start evaluating different solutions or products. Decision: They decide on a preferred solution or brand. Purchase: They buy the product or service. Retention: They seek help, support, or additional value after buying. Given a list of questions, categorize each question into one of these stages. If a question doesn’t clearly fit into these groups, suggest an alternative stage name that would reflect the customer’s experience more accurately. Provide your reasoning for each choice briefly. List of questions:" + " ".join(f"- {q}" for q in questions)
         )
 
         for attempt in range(3):
