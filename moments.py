@@ -26,6 +26,9 @@ st.set_page_config(
 st.sidebar.markdown(
     "---"
 )
+st.sidebar.header(
+    "User Moment Clusters with PAAs using AlsoAsked"
+)
 st.sidebar.markdown(
     "📖 [Read more: User Moments using AlsoAsked](https://www.chris-green.net/post/user-moments-using-also-asked)"
 )
