@@ -116,7 +116,8 @@ class OpenAIClassifier:
             try:
                 resp = self.client.chat.completions.create(
                     model=self.model,
-                    messages=[{"role": "system", "content": "You are an assistant grouping questions."}, {"role": "user", "content": prompt}],
+                    messages=[{"role": "system", "content": "You are an assistant grouping questions, you answer in strict JSON only"}, {"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
                     temperature=0,
                 )
                 return json.loads(resp.choices[0].message.content)
