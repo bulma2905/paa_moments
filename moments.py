@@ -118,7 +118,6 @@ class OpenAIClassifier:
                     model=self.model,
                     messages=[{"role": "system", "content": "You are an assistant grouping questions."}, {"role": "user", "content": prompt}],
                     temperature=0,
-                    response_format={"type": "json_object"}
                 )
                 return json.loads(resp.choices[0].message.content)
             except Exception as e:
