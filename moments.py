@@ -117,7 +117,7 @@ class OpenAIClassifier:
                 resp = self.client.chat.completions.create(
                     model=self.model,
                     messages=[{"role": "system", "content": "You are an assistant grouping questions, you answer in strict JSON only"}, {"role": "user", "content": prompt}],
-                response_format={"type": "json_object"},
+                    response_format={"type": "json_object"},
                     temperature=0,
                 )
                 return json.loads(resp.choices[0].message.content)
@@ -140,6 +140,9 @@ if st.sidebar.button("Run Pipeline"):
 
     # In-memory zip buffer
     zip_buffer = io.BytesIO()
+    # initialize merged moments storage
+    merged: Dict[str, Dict[str, List[str]]] = {}
+
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for seed in seeds:
             st.write(f"Processing seed: {seed}")
@@ -152,16 +155,33 @@ if st.sidebar.button("Run Pipeline"):
             st.write(f" - {len(filtered)}/{len(questions)} passed threshold")
             groups = classifier.group_by_moment(seed, filtered) if filtered else {}
 
-            # Create CSV strings
+            # Per-seed questions CSV
             q_df = pd.DataFrame({"seed": seed, "question": questions, "similarity": scores})
+
+            # Per-seed moments CSV & merge tracking
             m_rows = []
             for moment, qs in groups.items():
                 m_rows.append({"seed": seed, "moment": moment, "questions": "|".join(qs)})
+                if moment not in merged:
+                    merged[moment] = {"questions": [], "seeds": []}
+                merged[moment]["questions"].extend(qs)
+                merged[moment]["seeds"].append(seed)
             m_df = pd.DataFrame(m_rows)
 
-            # Write CSVs into zip
+            # Write seed-specific files
             zf.writestr(f"{seed.replace(' ', '_')}_questions.csv", q_df.to_csv(index=False))
             zf.writestr(f"{seed.replace(' ', '_')}_moments.csv", m_df.to_csv(index=False))
+
+        # After all seeds: write merged moments file
+        merged_rows = []
+        for moment, data in merged.items():
+            merged_rows.append({
+                "moment": moment,
+                "questions": "|".join(data["questions"]),
+                "seeds": "|".join(data["seeds"])
+            })
+        merged_df = pd.DataFrame(merged_rows)
+        zf.writestr("merged_moments.csv", merged_df.to_csv(index=False))
 
     zip_buffer.seek(0)
     st.download_button(
