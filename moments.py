@@ -12,9 +12,22 @@ from sentence_transformers import SentenceTransformer, util
 from openai import OpenAI
 
 # -----------------------------
+# Page Configuration
+# -----------------------------
+st.set_page_config(
+    page_title="🔍 PAA & Clustering Pipeline",
+    initial_sidebar_state="expanded"
+)
+
+# -----------------------------
 # Streamlit Sidebar Configuration
 # -----------------------------
 st.sidebar.header("🔧 Configuration")
+
+# Link back to the blog post
+st.sidebar.markdown(
+    "📖 [Read more: User Moments using AlsoAsked](https://www.chris-green.net/post/user-moments-using-also-asked)"
+)
 
 # API Keys
 OPENAI_API_KEY = st.sidebar.text_input("OpenAI API Key", type="password")
