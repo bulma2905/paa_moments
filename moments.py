@@ -12,7 +12,7 @@ from sentence_transformers import SentenceTransformer, util
 from openai import OpenAI
 
 # -----------------------------
-# Page Configuration
+# Page Configuration 
 # -----------------------------
 st.set_page_config(
     page_title="🔍 PAA & Clustering Pipeline",
@@ -22,12 +22,18 @@ st.set_page_config(
 # -----------------------------
 # Streamlit Sidebar Configuration
 # -----------------------------
-st.sidebar.header("🔧 Configuration")
 
-# Link back to the blog post
+st.sidebar.markdown(
+    "---"
+)
 st.sidebar.markdown(
     "📖 [Read more: User Moments using AlsoAsked](https://www.chris-green.net/post/user-moments-using-also-asked)"
 )
+st.sidebar.markdown(
+    "---"
+)
+
+st.sidebar.header("🔧 Configuration")
 
 # API Keys
 OPENAI_API_KEY = st.sidebar.text_input("OpenAI API Key", type="password")
@@ -49,10 +55,10 @@ LOG_LEVEL = st.sidebar.selectbox("Log Level", ["DEBUG", "INFO", "WARNING", "ERRO
 
 # Validate credentials and seeds
 if not OPENAI_API_KEY or not ALSOASKED_API_KEY:
-    st.error("Both OpenAI and AlsoAsked API keys are required.")
+    st.sidebar.error("Both OpenAI and AlsoAsked API keys are required.")
     st.stop()
 if not seeds_input.strip():
-    st.error("Please enter at least one seed term.")
+    st.sidebar.error("Please enter at least one seed term.")
     st.stop()
 
 # Parse seeds
