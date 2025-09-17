@@ -1,215 +1,371 @@
 import io
-import zipfile
 import logging
-import time
-from typing import List, Dict, Any
-
-import requests
-import pandas as pd
 import json
+from typing import List, Dict, Any
+import numpy as np
+import pandas as pd
 import streamlit as st
-from sentence_transformers import SentenceTransformer, util
 from openai import OpenAI
+from rapidfuzz import fuzz
+from sklearn.cluster import AgglomerativeClustering
+from semhash import SemHash
+import spacy
 
 # -----------------------------
-# Page Configuration 
+# Page Configuration
 # -----------------------------
 st.set_page_config(
-    page_title="🔍 PAA & Clustering Pipeline",
+    page_title="🔍 Groupowanie fraz → Excel Brief Pipeline",
     initial_sidebar_state="expanded"
 )
 
-# -----------------------------
-# Streamlit Sidebar Configuration
-# -----------------------------
+st.sidebar.header("⚙️ Configuration")
 
-st.sidebar.markdown(
-    "---"
-)
-st.sidebar.header(
-    "User Moment Clusters with PAAs using AlsoAsked"
-)
-st.sidebar.markdown(
-    "📖 [Read more: User Moments using AlsoAsked](https://www.chris-green.net/post/user-moments-using-also-asked)"
-)
-st.sidebar.markdown(
-    "---"
-)
-
-st.sidebar.header("🔧 Configuration")
-
-# API Keys
+# API Key
 OPENAI_API_KEY = st.sidebar.text_input("OpenAI API Key", type="password")
-ALSOASKED_API_KEY = st.sidebar.text_input("AlsoAsked API Key", type="password")
 
-# Model selection
-SBERT_MODEL = st.sidebar.text_input("SBERT Model", value="all-MiniLM-L6-v2")
-OPENAI_MODEL = st.sidebar.text_input("OpenAI Model", value="gpt-3.5-turbo")
+# Models
+OPENAI_EMBEDDING_MODEL = "text-embedding-3-large"
+OPENAI_CHAT_MODEL = st.sidebar.text_input("OpenAI Model", value="gpt-4o-mini")
 
-# Pipeline parameters
-TOP_X = st.sidebar.number_input("Top X results", min_value=1, value=50)
-THRESHOLD = st.sidebar.slider("Similarity Threshold", min_value=0.0, max_value=1.0, value=0.4, step=0.01)
-
-# Seed terms input
-seeds_input = st.sidebar.text_area("Enter seed terms, one per line:")
-
-# Logging level
-LOG_LEVEL = st.sidebar.selectbox("Log Level", ["DEBUG", "INFO", "WARNING", "ERROR"], index=1)
-
-# Validate credentials and seeds
-if not OPENAI_API_KEY or not ALSOASKED_API_KEY:
-    st.sidebar.error("Both OpenAI and AlsoAsked API keys are required.")
-    st.stop()
-if not seeds_input.strip():
-    st.sidebar.error("Please enter at least one seed term.")
-    st.stop()
-
-# Parse seeds
-seeds = [line.strip() for line in seeds_input.splitlines() if line.strip()]
+# Parameters with explanations
+DEDUP_THRESHOLD = st.sidebar.slider(
+    "Deduplication Threshold (RapidFuzz)", 0, 100, 85, 1
+)
+CLUSTER_SIM = st.sidebar.slider(
+    "Initial Clustering Similarity Threshold", 0.0, 1.0, 0.80, 0.01
+)
+MERGE_SIM = st.sidebar.slider(
+    "Cluster Merge Similarity Threshold", 0.0, 1.0, 0.85, 0.01
+)
+SEMHASH_SIM = st.sidebar.slider(
+    "SemHash Similarity Threshold", 0.80, 0.99, 0.95, 0.01
+)
+USE_SEMHASH = st.sidebar.checkbox("Użyj SemHash do deduplikacji", value=False)
 
 # -----------------------------
-# Helper Functions and Classes
+# NLP – Lematyzacja (spaCy)
 # -----------------------------
-def setup_logging(level: str = LOG_LEVEL) -> None:
-    logging.basicConfig(
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        level=getattr(logging, level.upper(), logging.INFO)
-    )
+@st.cache_resource
+def load_spacy():
+    try:
+        return spacy.load("pl_core_news_sm")
+    except:
+        st.warning("⚠️ Musisz zainstalować model spaCy: python -m spacy download pl_core_news_sm")
+        return None
 
-class AlsoAskedClient:
-    def __init__(self, api_key: str, base_url: str = "https://alsoaskedapi.com/v1/search"):
-        self.url = base_url
-        self.headers = {"Content-Type": "application/json", "X-Api-Key": api_key}
-        self.session = requests.Session()
-        self.session.headers.update(self.headers)
+nlp = load_spacy()
 
-    def get_questions(self, seed_query: str, limit: int = TOP_X, depth: int = 2, region: str = "gb", language: str = "en") -> List[str]:
-        payload = {"terms": [seed_query], "language": language, "region": region, "depth": depth, "fresh": True, "async": False, "notify_webhooks": False}
-        def flatten(qs: Any) -> List[str]:
-            flat: List[str] = []
-            if not isinstance(qs, list):
-                return flat
-            for q in qs:
-                if not isinstance(q, dict): continue
-                text = q.get("question") or q.get("query")
-                if text: flat.append(text)
-                nested = q.get("results") or []
-                flat.extend(flatten(nested))
-            return flat
-        for attempt in range(3):
-            try:
-                logging.info(f"Fetching PAA for '{seed_query}', attempt {attempt+1}")
-                resp = self.session.post(self.url, json=payload, timeout=60)
-                resp.raise_for_status()
-                data = resp.json() or {}
-                queries = data.get("queries") or []
-                if not queries or not isinstance(queries, list):
-                    logging.warning(f"No 'queries' list returned for '{seed_query}'")
-                    return []
-                results = (queries[0] or {}).get("results") or []
-                return flatten(results)[:limit]
-            except Exception as e:
-                logging.warning(f"AlsoAsked attempt {attempt+1} failed: {e}")
-                time.sleep(3)
-        logging.error(f"All AlsoAsked attempts failed for '{seed_query}'")
-        return []
+def lemmatize_texts(texts: List[str]) -> List[str]:
+    """Zwraca lematy tekstów (używane tylko do embeddingów)."""
+    if not nlp:
+        return texts
+    return [" ".join([token.lemma_.lower() for token in nlp(t)]) for t in texts]
 
-class SBERTRelevance:
-    def __init__(self, model_name: str = SBERT_MODEL):
-        logging.info(f"Loading SBERT model '{model_name}'")
-        self.model = SentenceTransformer(model_name)
+# -----------------------------
+# Helpers
+# -----------------------------
+def deduplicate(questions: List[str], threshold: int = 85) -> List[str]:
+    unique = []
+    for q in questions:
+        if not any(fuzz.ratio(q, u) >= threshold for u in unique):
+            unique.append(q)
+    return unique
 
-    def score(self, seed: str, questions: List[str]) -> List[float]:
-        embeddings = self.model.encode([seed] + questions, convert_to_tensor=True)
-        seed_emb, question_embs = embeddings[0], embeddings[1:]
-        return util.cos_sim(seed_emb, question_embs)[0].tolist()
+def semhash_deduplicate(questions: List[str], threshold: float = 0.95) -> List[str]:
+    try:
+        sh = SemHash.from_records(records=questions)
+        result = sh.self_deduplicate(threshold=threshold)
+        if hasattr(result, "selected"):
+            return result.selected
+        elif hasattr(result, "deduplicated"):
+            return result.deduplicated
+        elif isinstance(result, list):
+            return result
+        else:
+            return deduplicate(questions, threshold=90)
+    except Exception as e:
+        logging.warning(f"⚠️ SemHash failed ({e}) → fallback RapidFuzz")
+        return deduplicate(questions, threshold=90)
 
-class OpenAIClassifier:
-    def __init__(self, client: OpenAI, model: str = OPENAI_MODEL):
-        self.client = client
-        self.model = model
+def embed_texts(client: OpenAI, texts: List[str], model=OPENAI_EMBEDDING_MODEL) -> np.ndarray:
+    response = client.embeddings.create(model=model, input=texts)
+    return np.array([d.embedding for d in response.data])
 
-    def group_by_moment(self, seed: str, questions: List[str]) -> Dict[str, List[str]]:
-        prompt = (
-            f"You are a customer journey specialist. For the seed '{seed}', organize the questions below into user-centric moments—stages in a real person's exploration or use of this topic. You are assisting in organizing a list of customer questions into groups reflecting key stages of a typical customer journey (such as Awareness, Consideration, Decision, Purchase, and Retention). Each question represents a moment in the customer’s experience. Here are examples of typical stages: Awareness: The customer realizes they have a need or a problem. Consideration: They start evaluating different solutions or products. Decision: They decide on a preferred solution or brand. Purchase: They buy the product or service. Retention: They seek help, support, or additional value after buying. Given a list of questions, categorize each question into one of these stages. If a question doesn’t clearly fit into these groups, suggest an alternative stage name that would reflect the customer’s experience more accurately. Provide your reasoning for each choice briefly. List of questions:" + " ".join(f"- {q}" for q in questions)
-        )
-
-        for attempt in range(3):
-            try:
-                resp = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[{"role": "system", "content": "You are an assistant grouping questions, you answer in strict JSON only"}, {"role": "user", "content": prompt}],
-                    response_format={"type": "json_object"},
-                    temperature=0,
-                )
-                return json.loads(resp.choices[0].message.content)
-            except Exception as e:
-                logging.warning(f"OpenAI attempt {attempt+1} failed: {e}")
-                time.sleep(3)
-        logging.error(f"All OpenAI attempts failed for '{seed}'")
+def cluster_questions(questions: List[str], embeddings: np.ndarray, sim_threshold=0.8) -> Dict[int, List[str]]:
+    if not questions:
         return {}
-
-# Main Streamlit App
-st.title("🔍 PAA & Clustering Pipeline")
-if st.sidebar.button("Run Pipeline"):
-    setup_logging(LOG_LEVEL)
-    st.info("Starting pipeline...")
-
-    also_client = AlsoAskedClient(api_key=ALSOASKED_API_KEY)
-    sbert = SBERTRelevance()
-    openai_client = OpenAI(api_key=OPENAI_API_KEY)
-    classifier = OpenAIClassifier(client=openai_client)
-
-    # In-memory zip buffer
-    zip_buffer = io.BytesIO()
-    # initialize merged moments storage
-    merged: Dict[str, Dict[str, List[str]]] = {}
-
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-        for seed in seeds:
-            st.write(f"Processing seed: {seed}")
-            questions = also_client.get_questions(seed)
-            if not questions:
-                st.warning(f"No questions retrieved for '{seed}'. Skipping.")
-                continue
-            scores = sbert.score(seed, questions)
-            filtered = [q for q, s in zip(questions, scores) if s >= THRESHOLD]
-            st.write(f" - {len(filtered)}/{len(questions)} passed threshold")
-            groups = classifier.group_by_moment(seed, filtered) if filtered else {}
-
-            # Per-seed questions CSV
-            q_df = pd.DataFrame({"seed": seed, "question": questions, "similarity": scores})
-
-            # Per-seed moments CSV & merge tracking
-            m_rows = []
-            for moment, qs in groups.items():
-                m_rows.append({"seed": seed, "moment": moment, "questions": "|".join(qs)})
-                if moment not in merged:
-                    merged[moment] = {"questions": [], "seeds": []}
-                merged[moment]["questions"].extend(qs)
-                merged[moment]["seeds"].append(seed)
-            m_df = pd.DataFrame(m_rows)
-
-            # Write seed-specific files
-            zf.writestr(f"{seed.replace(' ', '_')}_questions.csv", q_df.to_csv(index=False))
-            zf.writestr(f"{seed.replace(' ', '_')}_moments.csv", m_df.to_csv(index=False))
-
-        # After all seeds: write merged moments file
-        merged_rows = []
-        for moment, data in merged.items():
-            merged_rows.append({
-                "moment": moment,
-                "questions": "|".join(data["questions"]),
-                "seeds": "|".join(data["seeds"])
-            })
-        merged_df = pd.DataFrame(merged_rows)
-        zf.writestr("merged_moments.csv", merged_df.to_csv(index=False))
-
-    zip_buffer.seek(0)
-    st.download_button(
-        label="📥 Download All Outputs",
-        data=zip_buffer.getvalue(),
-        file_name="outputs.zip",
-        mime="application/zip"
+    clustering = AgglomerativeClustering(
+        n_clusters=None,
+        metric="cosine",
+        linkage="average",
+        distance_threshold=1 - sim_threshold,
     )
-    st.success("Pipeline complete!")
+    labels = clustering.fit_predict(embeddings)
+    clustered: Dict[int, List[str]] = {}
+    for label, q in zip(labels, questions):
+        clustered.setdefault(int(label), []).append(q)
+    return clustered
+
+def merge_similar_clusters(clusters: Dict[int, List[str]], embeddings: np.ndarray, sim_threshold=0.85, q2i: Dict[str, int] = None) -> Dict[int, List[str]]:
+    if not clusters:
+        return {}
+    centroids = {}
+    for cid, qs in clusters.items():
+        idxs = [q2i[q] for q in qs if q in q2i]
+        if not idxs:
+            continue
+        centroid = np.mean(embeddings[idxs], axis=0)
+        centroid = centroid / (np.linalg.norm(centroid) + 1e-12)
+        centroids[cid] = centroid
+
+    merged: Dict[int, List[str]] = {}
+    used = set()
+    new_id = 0
+    cluster_ids = list(clusters.keys())
+
+    for cid in cluster_ids:
+        if cid in used or cid not in centroids:
+            continue
+        merged[new_id] = list(clusters[cid])
+        used.add(cid)
+        for cid2 in cluster_ids:
+            if cid2 in used or cid2 not in centroids:
+                continue
+            sim = float(np.dot(centroids[cid], centroids[cid2]))
+            if sim >= sim_threshold:
+                merged[new_id].extend(clusters[cid2])
+                used.add(cid2)
+        new_id += 1
+    return merged
+
+def global_deduplicate_clusters(clusters: Dict[int, List[str]], threshold: int = 90) -> Dict[int, List[str]]:
+    seen = []
+    new_clusters: Dict[int, List[str]] = {}
+    for cid, qs in clusters.items():
+        unique_qs = []
+        for q in qs:
+            if not any(fuzz.ratio(q, s) >= threshold for s in seen):
+                unique_qs.append(q)
+                seen.append(q)
+        if unique_qs:
+            new_clusters[cid] = unique_qs
+    return new_clusters
+
+def validate_clusters_with_llm(clusters: Dict[int, List[str]], client: OpenAI, model: str = "gpt-4o-mini") -> Dict[int, List[str]]:
+    if not clusters:
+        return clusters
+
+    id2cid = {i: cid for i, cid in enumerate(clusters.keys())}
+    clusters_list = [f"Cluster {i}: {', '.join(qs)}" for i, (cid, qs) in enumerate(clusters.items())]
+
+    prompt = f"""
+Masz listę klastrów fraz. Twoim zadaniem jest sprawdzić, czy któreś klastry znaczą to samo.
+⚠️ Bardzo ważne zasady:
+- Scalaj TYLKO wtedy, gdy frazy są prawie identyczne (synonimy, odmiana, szyk słów).
+- NIE łącz klastrów, jeśli dotyczą różnych kontekstów (np. ceny ≠ dzieci, gotowanie ≠ ceny).
+- Uwzględnij lematyzację – jeśli frazy różnią się tylko formą gramatyczną, SCAL je.
+- Unikaj łączenia, które mogłoby prowadzić do kanibalizacji SEO (dwa różne tematy artykułów nie mogą być scalone).
+- Jeżeli masz wątpliwości, NIE scalaj.
+
+Lista klastrów:
+{chr(10).join(clusters_list)}
+
+Odpowiedz w JSON, w formacie:
+{{
+  "scalone": [
+    {{"id": [0, 3]}},
+    {{"id": [1]}},
+    {{"id": [2, 5]}}
+  ]
+}}
+"""
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "Jesteś asystentem SEO. Zwracasz tylko czysty JSON zgodny z formatem."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0,
+        )
+        content = resp.choices[0].message.content.strip()
+        st.subheader("📑 Surowa odpowiedź LLM (walidacja klastrów)")
+        st.code(content, language="json")
+
+        start = content.find("{")
+        end = content.rfind("}")
+        if start != -1 and end != -1:
+            json_str = content[start:end+1]
+        else:
+            raise ValueError("⚠️ Brak poprawnego JSON w odpowiedzi LLM")
+
+        data = json.loads(json_str)
+
+        merged: Dict[int, List[str]] = {}
+        scalone_info = []
+        new_id = 0
+        used_ids = set()
+
+        for group in data.get("scalone", []):
+            combined = []
+            ids = group.get("id", [])
+            for idx in ids:
+                cid = id2cid.get(idx)
+                if cid in clusters:
+                    combined.extend(clusters[cid])
+                    used_ids.add(idx)
+            if combined:
+                merged[new_id] = combined
+                scalone_info.append(f"Scalono klastry {ids} → {combined}")
+                new_id += 1
+
+        all_ids = set(id2cid.keys())
+        leftover_ids = all_ids - used_ids
+        for idx in leftover_ids:
+            cid = id2cid.get(idx)
+            if cid in clusters:
+                merged[new_id] = clusters[cid]
+                scalone_info.append(f"Zachowano klaster {idx} → {clusters[cid]}")
+                new_id += 1
+
+        if scalone_info:
+            st.subheader("📊 Raport scalania klastrów")
+            for line in scalone_info:
+                st.write(line)
+
+        return merged if merged else clusters
+    except Exception as e:
+        logging.warning(f"⚠️ Cluster validation with LLM failed: {e}")
+        return clusters
+
+def generate_article_brief(questions: List[str], client: OpenAI | None, model: str = "gpt-4o-mini") -> Dict[str, Any]:
+    if client is None:
+        return {"intencja": "", "frazy": ", ".join(questions), "tytul": "", "wytyczne": ""}
+    prompt = f"""
+Dla poniższej listy fraz przygotuj dane do planu artykułu.
+
+Frazy: {questions}
+
+Odpowiedz w formacie:
+
+Intencja: [typ intencji wyszukiwania]
+Frazy: [lista fraz long-tail, rozdzielona przecinkami]
+Tytuł: [SEO-friendly, max 70 znaków, naturalny, z głównym keywordem]
+Wytyczne: [2–3 zdania opisu oczekiwań użytkownika]
+"""
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "Jesteś asystentem SEO. Zawsze trzymaj się formatu."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.7,
+        )
+        content = resp.choices[0].message.content.strip()
+        result = {"intencja": "", "frazy": "", "tytul": "", "wytyczne": ""}
+        for line in content.splitlines():
+            low = line.lower()
+            if low.startswith("intencja:"):
+                result["intencja"] = line.split(":", 1)[1].strip()
+            elif low.startswith("frazy:"):
+                result["frazy"] = line.split(":", 1)[1].strip()
+            elif low.startswith("tytuł:") or low.startswith("tytul:"):
+                result["tytul"] = line.split(":", 1)[1].strip()
+            elif low.startswith("wytyczne:"):
+                result["wytyczne"] = line.split(":", 1)[1].strip()
+        result["frazy"] = result["frazy"] or ", ".join(questions)
+        return result
+    except Exception as e:
+        logging.warning(f"⚠️ Brief parse failed: {e}")
+        return {"intencja": "", "frazy": ", ".join(questions), "tytul": "", "wytyczne": ""}
+
+# -----------------------------
+# Main App
+# -----------------------------
+st.title("🔍 Groupowanie fraz → Excel Brief Pipeline")
+
+status = st.empty()
+progress_bar = st.progress(0)
+log_box = st.container()
+
+def update_status(message: str, progress: int):
+    status.text(message)
+    progress_bar.progress(progress)
+    log_box.write(message)
+
+phrases_input = st.sidebar.text_area("Wklej frazy, jedna na linię:")
+
+if st.sidebar.button("Uruchom grupowanie"):
+    if not phrases_input.strip():
+        st.warning("⚠️ Wklej najpierw listę fraz.")
+        st.stop()
+
+    if not OPENAI_API_KEY:
+        st.error("⚠️ Podaj OpenAI API Key w panelu bocznym.")
+        st.stop()
+
+    openai_client = OpenAI(api_key=OPENAI_API_KEY)
+
+    questions = [line.strip() for line in phrases_input.splitlines() if line.strip()]
+    update_status(f"📥 Wczytano frazy: {len(questions)}", 5)
+
+    if USE_SEMHASH:
+        filtered = semhash_deduplicate(questions, threshold=SEMHASH_SIM)
+        update_status(f"🧹 Deduplication (SemHash {SEMHASH_SIM}): {len(questions)} → {len(filtered)}", 15)
+    else:
+        filtered = deduplicate(questions, threshold=DEDUP_THRESHOLD)
+        update_status(f"🧹 Deduplication (RapidFuzz {DEDUP_THRESHOLD}): {len(questions)} → {len(filtered)}", 15)
+
+    update_status("🧠 Generowanie embeddingów...", 35)
+    lemmatized = lemmatize_texts(filtered)
+    embeddings = embed_texts(openai_client, lemmatized, model=OPENAI_EMBEDDING_MODEL)
+    q2i = {q: i for i, q in enumerate(filtered)}
+
+    clusters = cluster_questions(filtered, embeddings, sim_threshold=CLUSTER_SIM)
+    update_status(f"🧩 Klastrowanie fraz: powstało {len(clusters)} klastrów", 55)
+
+    clusters = merge_similar_clusters(clusters, embeddings, sim_threshold=MERGE_SIM, q2i=q2i)
+    update_status(f"🔗 Scalanie podobnych klastrów (próg {MERGE_SIM}): teraz {len(clusters)} klastrów", 70)
+
+    clusters = global_deduplicate_clusters(clusters, threshold=90)
+    update_status(f"🧽 Usuwanie duplikatów między klastrami: {len(clusters)} końcowych klastrów", 85)
+
+    clusters = validate_clusters_with_llm(clusters, openai_client, model=OPENAI_CHAT_MODEL)
+    update_status(f"🤖 Walidacja LLM: {len(clusters)} klastrów po scaleniu semantycznym", 90)
+
+    rows = []
+    total = len(clusters)
+    for i, (label, qs) in enumerate(clusters.items(), 1):
+        update_status(f"📝 Generuję brief {i}/{total} ({len(qs)} fraz)", int(95 * i / total))
+        brief = generate_article_brief(qs, openai_client, model=OPENAI_CHAT_MODEL)
+        rows.append({
+            "cluster_id": label,
+            "intencja": brief.get("intencja", ""),
+            "frazy": ", ".join(qs),
+            "tytul": brief.get("tytul", ""),
+            "wytyczne": brief.get("wytyczne", ""),
+        })
+
+    df = pd.DataFrame(rows)
+    xlsx_buffer = io.BytesIO()
+    with pd.ExcelWriter(xlsx_buffer, engine="openpyxl") as writer:
+        df.to_excel(writer, sheet_name="Briefs", index=False)
+    xlsx_buffer.seek(0)
+
+    st.session_state["excel_buffer"] = xlsx_buffer.getvalue()
+    st.session_state["results"] = rows
+
+    update_status("✅ Gotowe!", 100)
+
+if "excel_buffer" in st.session_state:
+    st.download_button(
+        label="📥 Pobierz Excel",
+        data=st.session_state["excel_buffer"],
+        file_name="frazy_briefy.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    st.success("✅ Zakończono przetwarzanie.")
+    st.subheader("📊 Podgląd wyników")
+    st.dataframe(pd.DataFrame(st.session_state["results"]))

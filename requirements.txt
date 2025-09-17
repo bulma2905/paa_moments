@@ -5,3 +5,7 @@ sentence-transformers
 transformers
 openai
 torch
+scikit-learn
+rapidfuzz
+numpy
+openpyxl
