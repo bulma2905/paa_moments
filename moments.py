@@ -44,6 +44,23 @@ SEMHASH_SIM = st.sidebar.slider(
 USE_SEMHASH = st.sidebar.checkbox("Użyj SemHash do deduplikacji", value=False)
 
 # -----------------------------
+# Parametry – objaśnienia
+# -----------------------------
+st.sidebar.markdown("### ℹ️ Objaśnienia parametrów")
+st.sidebar.info("""
+**Deduplication Threshold (RapidFuzz)** – próg podobieństwa (0–100), powyżej którego frazy są traktowane jako duplikaty.  
+Przykład: „gotowanie kukurydzy” i „jak gotować kukurydzę” przy 85 będą scalone.
+
+**Initial Clustering Similarity Threshold** – minimalne podobieństwo (0–1), żeby frazy trafiły do tego samego klastra na początku.  
+Niższa wartość = większe grupy.
+
+**Cluster Merge Similarity Threshold** – próg podobieństwa (0–1), przy którym łączymy całe klastry w większe grupy.  
+Wyższa wartość = mniej łączenia.
+
+**SemHash Similarity Threshold** – używane, gdy zaznaczysz opcję SemHash. Określa, jak semantycznie bliskie muszą być frazy, żeby uznać je za duplikaty.
+""")
+
+# -----------------------------
 # NLP – Lematyzacja (spaCy)
 # -----------------------------
 @st.cache_resource
@@ -145,7 +162,7 @@ def global_deduplicate_clusters(clusters: Dict[int, List[str]], threshold: int =
     for cid, qs in clusters.items():
         unique_qs = []
         for q in qs:
-            if not any(fuzz.ratio(q, s) >= threshold for s in seen):
+            if not any(fuzz.ratio(q, s) >= threshold for s) in seen:
                 unique_qs.append(q)
                 seen.append(q)
         if unique_qs:
@@ -342,6 +359,7 @@ if st.sidebar.button("Uruchom grupowanie"):
         brief = generate_article_brief(qs, openai_client, model=OPENAI_CHAT_MODEL)
         rows.append({
             "cluster_id": label,
+            "main_phrase": qs[0] if qs else "",   # 👈 fraza główna
             "intencja": brief.get("intencja", ""),
             "frazy": ", ".join(qs),
             "tytul": brief.get("tytul", ""),
