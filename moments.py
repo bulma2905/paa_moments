@@ -162,7 +162,7 @@ def global_deduplicate_clusters(clusters: Dict[int, List[str]], threshold: int =
     for cid, qs in clusters.items():
         unique_qs = []
         for q in qs:
-            if not any(fuzz.ratio(q, s) >= threshold for s) in seen:
+            if not any(fuzz.ratio(q, s) >= threshold for s in seen):
                 unique_qs.append(q)
                 seen.append(q)
         if unique_qs:
@@ -359,7 +359,7 @@ if st.sidebar.button("Uruchom grupowanie"):
         brief = generate_article_brief(qs, openai_client, model=OPENAI_CHAT_MODEL)
         rows.append({
             "cluster_id": label,
-            "main_phrase": qs[0] if qs else "",   # 👈 fraza główna
+            "main_phrase": qs[0] if qs else "",   # fraza główna
             "intencja": brief.get("intencja", ""),
             "frazy": ", ".join(qs),
             "tytul": brief.get("tytul", ""),
