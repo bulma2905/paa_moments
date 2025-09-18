@@ -25,9 +25,18 @@ st.sidebar.header("⚙️ Configuration")
 # API Key
 OPENAI_API_KEY = st.sidebar.text_input("OpenAI API Key", type="password")
 
-# Models
-OPENAI_EMBEDDING_MODEL = "text-embedding-3-large"
-OPENAI_CHAT_MODEL = st.sidebar.text_input("OpenAI Model", value="gpt-4o-mini")
+# Models - wybór z listy
+OPENAI_EMBEDDING_MODEL = st.sidebar.selectbox(
+    "Model embeddingów",
+    ["text-embedding-3-large", "text-embedding-3-small"],
+    index=0
+)
+
+OPENAI_CHAT_MODEL = st.sidebar.selectbox(
+    "Model czatu",
+    ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1"],
+    index=0
+)
 
 # Parameters with explanations
 DEDUP_THRESHOLD = st.sidebar.slider(
