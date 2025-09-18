@@ -2,6 +2,7 @@ import io
 import logging
 import json
 from typing import List, Dict, Any
+
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -177,20 +178,18 @@ def validate_clusters_with_llm(clusters: Dict[int, List[str]], client: OpenAI, m
     clusters_list = [f"Cluster {i}: {', '.join(qs)}" for i, (cid, qs) in enumerate(clusters.items())]
 
     prompt = f"""
-Masz listę klastrów fraz kluczowych. Twoim zadaniem jest zdecydować, które klastry można bezpiecznie scalić.
+Masz listę klastrów fraz. Twoim zadaniem jest sprawdzić, czy któreś klastry znaczą to samo.
+⚠️ Bardzo ważne zasady:
+- Scalaj TYLKO wtedy, gdy frazy są prawie identyczne (synonimy, odmiana, szyk słów).
+- NIE łącz klastrów, jeśli dotyczą różnych kontekstów (np. ceny ≠ dzieci, gotowanie ≠ ceny).
+- Uwzględnij lematyzację – jeśli frazy różnią się tylko formą gramatyczną, SCAL je.
+- Unikaj łączenia, które mogłoby prowadzić do kanibalizacji SEO (dwa różne tematy artykułów nie mogą być scalone).
+- Jeżeli masz wątpliwości, NIE scalaj.
 
-Zasady:
-1. Scalaj klastry, jeśli dotyczą tej samej intencji wyszukiwania, nawet jeśli frazy są różnie sformułowane.
-   - Przykład: „co robi facet gdy mu się podobasz” i „jakie sygnały wysyła facet gdy jest zainteresowany” → to samo.
-   - Przykład: „co kupić facetowi na urodziny” i „co na 50 urodziny dla faceta” → to samo.
-2. Nie scalaj, jeśli klastry odnoszą się do różnych tematów lub kontekstów, nawet jeśli występują podobne słowa kluczowe.
-   - Przykład: „cena kukurydzy” ≠ „gotowanie kukurydzy”.
-   - Przykład: „sukienka na wesele” ≠ „jak uszyć sukienkę”.
-3. Zawsze oceniaj pod kątem SEO:
-   - scalaj tylko wtedy, gdy artykuł mógłby naturalnie odpowiedzieć na wszystkie pytania razem,
-   - unikaj scalania, jeśli powstałyby artykuły z różnymi intencjami (np. zakupową i informacyjną).
-4. Jeśli masz wątpliwości – zostaw osobno.
-5. Na wyjściu podaj wyłącznie JSON w formacie:
+Lista klastrów:
+{chr(10).join(clusters_list)}
+
+Odpowiedz w JSON, w formacie:
 {{
   "scalone": [
     {{"id": [0, 3]}},
@@ -198,8 +197,6 @@ Zasady:
     {{"id": [2, 5]}}
   ]
 }}
-Lista klastrów:
-{chr(10).join(clusters_list)}
 """
     try:
         resp = client.chat.completions.create(
